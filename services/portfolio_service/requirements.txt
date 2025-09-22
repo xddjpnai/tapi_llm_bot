@@ -1,0 +1,5 @@
+aiokafka==0.10.0
+python-dotenv==1.0.1
+tinkoff-investments==0.2.0b116
+requests==2.32.5
+

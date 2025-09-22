@@ -1,0 +1,89 @@
+services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v23.3.11
+    command:
+      - redpanda start --overprovisioned --smp 1 --memory 1G --reserve-memory 0M --check=false --kafka-addr 0.0.0.0:9092 --advertise-kafka-addr redpanda:9092
+    ports:
+      - "9092:9092"
+      - "9644:9644"
+    environment:
+      - REDPANDA_AUTO_CREATE_TOPICS=true
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_PASSWORD=postgres
+    ports:
+      - "5432:5432"
+
+  bot_gateway:
+    build:
+      context: .
+      dockerfile: services/bot_gateway/Dockerfile
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - KAFKA_BROKERS=redpanda:9092
+      - STORAGE_URL=http://storage_service:8000
+      - CHART_URL=http://chart_service:8002
+    depends_on:
+      - redpanda
+      - storage_service
+
+  summary_service:
+    build:
+      context: .
+      dockerfile: services/summary_service/Dockerfile
+    environment:
+      - SONAR_API_KEY=${SONAR_API_KEY}
+      - KAFKA_BROKERS=redpanda:9092
+    depends_on:
+      - redpanda
+
+  portfolio_service:
+    build:
+      context: .
+      dockerfile: services/portfolio_service/Dockerfile
+    environment:
+      - KAFKA_BROKERS=redpanda:9092
+    depends_on:
+      - redpanda
+
+  quotes_service:
+    build:
+      context: .
+      dockerfile: services/quotes_service/Dockerfile
+    environment:
+      - KAFKA_BROKERS=redpanda:9092
+    depends_on:
+      - redpanda
+
+  storage_service:
+    build:
+      context: .
+      dockerfile: services/storage_service/Dockerfile
+    environment:
+      - DATABASE_URL=postgresql+psycopg2://postgres:postgres@postgres:5432/postgres
+      - KAFKA_BROKERS=redpanda:9092
+    depends_on:
+      - postgres
+      - redpanda
+
+  scheduler_service:
+    build:
+      context: .
+      dockerfile: services/scheduler_service/Dockerfile
+    environment:
+      - STORAGE_URL=http://storage_service:8000
+      - KAFKA_BROKERS=redpanda:9092
+    depends_on:
+      - storage_service
+      - redpanda
+
+  chart_service:
+    build:
+      context: .
+      dockerfile: services/chart_service/Dockerfile
+    ports:
+      - "8002:8002"
+
+

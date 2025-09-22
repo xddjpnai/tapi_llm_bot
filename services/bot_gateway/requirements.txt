@@ -1,0 +1,8 @@
+aiogram==2.25.1
+aiokafka==0.10.0
+python-dotenv==1.0.1
+pydantic==1.10.15
+requests==2.32.5
+tinkoff-investments==0.2.0b116
+aiohttp==3.8.6
+
