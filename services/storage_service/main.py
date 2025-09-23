@@ -158,18 +158,27 @@ def get_portfolio(user_id: int):
 
 @app.get("/users/{user_id}/settings")
 def get_settings(user_id: int):
-    with engine.begin() as conn:
-        row = conn.execute(settings.select().where(settings.c.user_id == user_id)).fetchone()
-        if not row:
-            conn.execute(users.insert().values(user_id=user_id))
-            conn.execute(settings.insert().values(user_id=user_id))
+    try:
+        with engine.begin() as conn:
             row = conn.execute(settings.select().where(settings.c.user_id == user_id)).fetchone()
+            if row:
+                return {
+                    "daily_summary_time": row.daily_summary_time,
+                    "daily_summary_enabled": bool(row.daily_summary_enabled),
+                    "alert_threshold_percent": row.alert_threshold_percent,
+                    "notify_quotes": bool(row.notify_quotes),
+                    "notify_news": bool(row.notify_news),
+                }
+    except Exception:
+        # fallthrough to defaults
+        pass
+    # Defaults if no settings yet or on error
     return {
-        "daily_summary_time": row.daily_summary_time,
-        "daily_summary_enabled": bool(row.daily_summary_enabled),
-        "alert_threshold_percent": row.alert_threshold_percent,
-        "notify_quotes": bool(row.notify_quotes),
-        "notify_news": bool(row.notify_news),
+        "daily_summary_time": "09:00",
+        "daily_summary_enabled": False,
+        "alert_threshold_percent": 3.0,
+        "notify_quotes": True,
+        "notify_news": True,
     }
 
 
