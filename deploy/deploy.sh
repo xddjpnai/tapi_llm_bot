@@ -85,6 +85,19 @@ echo "==> Building and starting services..."
 $SUDO $COMPOSE_CMD pull || true
 $SUDO $COMPOSE_CMD up -d --build
 
+echo "==> Validating connectivity to Telegram..."
+set +e
+if command_exists curl; then
+  curl -m 5 -sS https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe >/dev/null
+  TG_RC=$?
+else
+  TG_RC=0
+fi
+set -e
+if [[ "$TG_RC" -ne 0 ]]; then
+  echo "Warning: Can't reach Telegram API from this host. Ensure outbound 443/TCP is allowed." >&2
+fi
+
 echo "==> Deployment complete. Useful commands:"
 echo "   $COMPOSE_CMD ps"
 echo "   $COMPOSE_CMD logs -f"

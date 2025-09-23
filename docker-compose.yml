@@ -3,23 +3,32 @@ services:
     image: docker.redpanda.com/redpandadata/redpanda:v23.3.11
     command:
       - redpanda start --overprovisioned --smp 1 --memory 1G --reserve-memory 0M --check=false --kafka-addr 0.0.0.0:9092 --advertise-kafka-addr redpanda:9092
+    restart: unless-stopped
     ports:
-      - "9092:9092"
-      - "9644:9644"
+      - "127.0.0.1:9092:9092"
+      - "127.0.0.1:9644:9644"
     environment:
       - REDPANDA_AUTO_CREATE_TOPICS=true
 
   postgres:
     image: postgres:15-alpine
+    restart: unless-stopped
     environment:
       - POSTGRES_PASSWORD=postgres
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
 
   bot_gateway:
     build:
       context: .
       dockerfile: services/bot_gateway/Dockerfile
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os,sys,requests as r;t=os.environ.get('TELEGRAM_BOT_TOKEN','');sys.exit(0) if (t and r.get('https://api.telegram.org/bot'+t+'/getMe', timeout=5).ok) else sys.exit(1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
     environment:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - KAFKA_BROKERS=redpanda:9092
@@ -33,6 +42,7 @@ services:
     build:
       context: .
       dockerfile: services/summary_service/Dockerfile
+    restart: unless-stopped
     environment:
       - SONAR_API_KEY=${SONAR_API_KEY}
       - KAFKA_BROKERS=redpanda:9092
@@ -43,6 +53,7 @@ services:
     build:
       context: .
       dockerfile: services/portfolio_service/Dockerfile
+    restart: unless-stopped
     environment:
       - KAFKA_BROKERS=redpanda:9092
     depends_on:
@@ -52,6 +63,7 @@ services:
     build:
       context: .
       dockerfile: services/quotes_service/Dockerfile
+    restart: unless-stopped
     environment:
       - KAFKA_BROKERS=redpanda:9092
     depends_on:
@@ -61,6 +73,7 @@ services:
     build:
       context: .
       dockerfile: services/storage_service/Dockerfile
+    restart: unless-stopped
     environment:
       - DATABASE_URL=postgresql+psycopg2://postgres:postgres@postgres:5432/postgres
       - KAFKA_BROKERS=redpanda:9092
@@ -72,6 +85,7 @@ services:
     build:
       context: .
       dockerfile: services/scheduler_service/Dockerfile
+    restart: unless-stopped
     environment:
       - STORAGE_URL=http://storage_service:8000
       - KAFKA_BROKERS=redpanda:9092
@@ -83,7 +97,8 @@ services:
     build:
       context: .
       dockerfile: services/chart_service/Dockerfile
+    restart: unless-stopped
     ports:
-      - "8002:8002"
+      - "127.0.0.1:8002:8002"
 
 
