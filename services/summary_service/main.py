@@ -5,10 +5,10 @@ from dotenv import load_dotenv
 
 from shared.messaging.kafka import create_consumer, create_producer
 from shared.schemas import SummaryRequest, NotificationOutbound, SummaryChunk
-from shared.llm.prompts import PROMPT_TICKER_SUMMARY, PROMPT_TICKER_NEWS
+from shared.llm.prompts import PROMPT_TICKER_SUMMARY, PROMPT_TICKER_NEWS, PROMPT_DAILY
 from shared.llm.perplexity import call_perplexity_with_citations
 from shared.format import apply_citation_links_markdown_to_html, tg_bold, tg_code, chunk_text
-from shared.topics import SUMMARY_REQUEST, NEWS_REQUEST, NOTIFICATIONS_OUTBOUND
+from shared.topics import SUMMARY_REQUEST, NEWS_REQUEST, NOTIFICATIONS_OUTBOUND, DAILY_REQUEST
 
 
 load_dotenv()
@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 async def worker():
     cons = await create_consumer(SUMMARY_REQUEST, group_id="summary-service")
     news_cons = await create_consumer(NEWS_REQUEST, group_id="summary-service-news")
+    daily_cons = await create_consumer(DAILY_REQUEST, group_id="summary-service-daily")
     prod = await create_producer()
     try:
         while True:
@@ -47,7 +48,6 @@ async def worker():
                 except Exception:
                     logger.exception("summary processing failed")
             # новости
-            # news
             try:
                 nmsg = await asyncio.wait_for(news_cons.getone(), timeout=0.1)
             except Exception:
@@ -75,9 +75,29 @@ async def worker():
                             items.append(SummaryChunk(ticker=tkr, html=f"📰 {tg_bold(tkr)} ({tg_code(tkr)})\n{ch}"))
                 if items:
                     await prod.send_and_wait(NOTIFICATIONS_OUTBOUND, {"user_id": user_id, "items": [i.dict() for i in items]}, key=str(user_id).encode())
+
+            # daily
+            try:
+                dmsg = await asyncio.wait_for(daily_cons.getone(), timeout=0.1)
+            except Exception:
+                dmsg = None
+            if dmsg:
+                dd = dmsg.value
+                user_id = dd.get("user_id")
+                tickers = dd.get("tickers") or []
+                logger.info("daily.request: user_id=%s tickers=%s", user_id, len(tickers))
+                text, cites = call_perplexity_with_citations(PROMPT_DAILY.format(tickers=", ".join(tickers[:20])))
+                if not text or text.startswith("Perplexity API error") or text == "Perplexity API key not configured.":
+                    content = "📊 Ежедневная сводка: нет данных от LLM. Попробуйте позже."
+                    items = [SummaryChunk(ticker="DAILY", html=content)]
+                else:
+                    html = apply_citation_links_markdown_to_html(text, cites)
+                    items = [SummaryChunk(ticker="DAILY", html=ch) for ch in chunk_text(html, 3500)]
+                await prod.send_and_wait(NOTIFICATIONS_OUTBOUND, {"user_id": user_id, "items": [i.dict() for i in items]}, key=str(user_id).encode())
     finally:
         await cons.stop()
         await news_cons.stop()
+        await daily_cons.stop()
         await prod.stop()
 
 

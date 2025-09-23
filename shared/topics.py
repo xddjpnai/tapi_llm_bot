@@ -11,4 +11,6 @@ QUOTES_UPDATED = "quotes.updated"
 
 NEWS_REQUEST = "news.request"
 
+DAILY_REQUEST = "daily.request"
+
 

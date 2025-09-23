@@ -6,7 +6,7 @@ import aiohttp
 from dotenv import load_dotenv
 
 from shared.messaging.kafka import create_producer
-from shared.topics import SUMMARY_REQUEST
+from shared.topics import SUMMARY_REQUEST, DAILY_REQUEST
 
 
 load_dotenv()
@@ -31,7 +31,9 @@ async def tick_once():
                 tickers = [p.get("ticker") for p in pd.get("positions", []) if p.get("ticker") and p.get("ticker") not in {"RUB","RUB000UTSTOM"}]
                 if not tickers:
                     continue
+                # Отправим и обычные сводки по тикерам, и общую утреннюю сводку
                 await prod.send_and_wait(SUMMARY_REQUEST, {"user_id": uid, "tickers": tickers[:20]})
+                await prod.send_and_wait(DAILY_REQUEST, {"user_id": uid, "tickers": tickers[:20]})
         finally:
             await prod.stop()
 

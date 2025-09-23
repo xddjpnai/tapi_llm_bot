@@ -95,21 +95,25 @@ async def show_news(message: types.Message):
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(f"{STORAGE_URL}/users/{user_id}/portfolio") as resp:
-                if resp.status >= 300:
-                    data = {"positions": []}
-                else:
-                    data = await resp.json()
+                data = await resp.json()
         except Exception:
             data = {"positions": []}
     tickers = [p.get("ticker") for p in data.get("positions", []) if p.get("ticker") and p.get("ticker") not in {"RUB","RUB000UTSTOM"}]
     if not tickers:
         await message.answer("Нет бумаг для новостей.")
         return
+    # Быстрый фолбек-сообщение со ссылками, чтобы пользователь сразу получил ответ
+    links = []
+    for t in tickers[:5]:
+        g = f"https://news.google.com/search?q={t}"
+        y = f"https://news.search.yahoo.com/search?p={t}"
+        links.append(f"📰 {tg_bold(t)} — <a href=\"{g}\">Google</a> • <a href=\"{y}\">Yahoo</a>")
+    await message.answer("\n".join(links) + "\n\nГотовлю подробную выжимку…")
+    # Отправим асинхронно задачу на LLM
     prod = await create_producer()
     try:
         corr_id = str(uuid.uuid4())
         await prod.send_and_wait(NEWS_REQUEST, {"user_id": user_id, "tickers": tickers[:20], "correlation_id": corr_id}, key=str(user_id).encode())
-        await message.answer("Запросил новости…")
     finally:
         await prod.stop()
 
