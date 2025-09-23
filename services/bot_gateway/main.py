@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 from shared.messaging.kafka import create_producer, create_consumer
 from shared.schemas import SummaryRequest, NotificationOutbound
-from shared.topics import SUMMARY_REQUEST, NOTIFICATIONS_OUTBOUND, QUOTES_REQUEST, QUOTES_UPDATED, PORTFOLIO_REQUEST, NEWS_REQUEST
+from shared.topics import SUMMARY_REQUEST, NOTIFICATIONS_OUTBOUND, QUOTES_REQUEST, QUOTES_UPDATED, PORTFOLIO_REQUEST, NEWS_REQUEST, PORTFOLIO_UPDATED
 from shared.format import tg_bold, tg_code
 
 
@@ -23,6 +23,8 @@ dp = Dispatcher(bot)
 
 # Кеш имен счетов на время сессии редактирования
 accounts_cache: dict[int, list[str]] = {}
+# Ожидания обновления портфеля по correlation_id
+pending_portfolio_updates: dict[str, asyncio.Future] = {}
 
 
 main_kb = ReplyKeyboardMarkup(
@@ -257,115 +259,131 @@ async def accounts_done(call: types.CallbackQuery):
                 corr_id = str(uuid.uuid4())
                 payload = {"user_id": user_id, "accounts": accounts, "correlation_id": corr_id, "token": user_token}
                 print(f"[portfolio.request] user={user_id} accounts={accounts} corr={corr_id}")
+                # Prepare future before sending
+                fut = asyncio.get_event_loop().create_future()
+                pending_portfolio_updates[corr_id] = fut
                 await prod.send_and_wait(PORTFOLIO_REQUEST, payload, key=str(user_id).encode())
             finally:
                 await prod.stop()
             await call.message.answer("Счета сохранены. Загружаю портфель…")
-            # Сразу попробуем показать состояние портфеля как при нажатии кнопки "📁 Портфель"
+            # Wait for correlated portfolio.updated or timeout, then render current portfolio
             try:
-                async with aiohttp.ClientSession() as session:
-                    positions: list = []
-                    # подождем до ~10 секунд, пока storage_service применит обновление
-                    for _ in range(20):
-                        async with session.get(f"{STORAGE_URL}/users/{user_id}/portfolio") as resp_pf:
-                            data_pf = await resp_pf.json()
-                        positions = data_pf.get("positions", [])
-                        if positions:
-                            break
-                        await asyncio.sleep(0.5)
-                if positions:
-                    # Сформируем агрегированное сообщение (как в обработчике кнопки портфеля)
-                    total_all_time_abs = 0.0
-                    total_all_time_abs_any = False
-                    sec_positions = []
-                    rub_lines = []
-                    for p in positions:
-                        t = p.get("ticker") or "?"
-                        fg = p.get("figi") or ""
-                        qty = p.get("quantity") or 0
-                        ey = p.get("expected_yield")
-                        if t in {"RUB","RUB000UTSTOM"}:
-                            rub_lines.append((t, fg, qty))
-                            continue
-                        try:
-                            if ey is not None:
-                                total_all_time_abs += float(ey)
-                                total_all_time_abs_any = True
-                        except Exception:
-                            pass
-                        sec_positions.append((t, fg, qty))
-                    # Получим текущие цены по D1 для секций
-                    last_by_figi: dict[str, float] = {}
-                    if user_token and sec_positions:
-                        async with aiohttp.ClientSession() as s_last:
-                            for t, fg, qty in sec_positions:
-                                if not fg:
-                                    continue
-                                try:
-                                    async with s_last.post(f"{CHART_URL}/chart_stats", json={"token": user_token, "ident": fg, "tf": "D1"}) as rs2:
-                                        if rs2.status == 200:
-                                            st2 = await rs2.json()
-                                            lv = st2.get("last")
-                                            if lv is not None:
-                                                last_by_figi[fg] = float(lv)
-                                except Exception:
-                                    continue
-                    lines = []
-                    for t, fg, qty in sec_positions:
-                        price_txt = tg_code(last_by_figi.get(fg)) if fg in last_by_figi else "н/д"
-                        lines.append(f"📁 {tg_bold(t)}\n• Количество: {tg_code(qty)}\n• Цена: {price_txt}")
-                    for t, fg, qty in rub_lines:
-                        lines.append(f"💰 {tg_bold('Рубли (RUB)')}\n• Остаток: {tg_code(qty)}")
-                    # Посчитаем суточную динамику
-                    daily_abs = None
-                    daily_pct = None
-                    current_value = None
-                    if user_token:
-                        async with aiohttp.ClientSession() as s_port:
-                            prev_sum = 0.0
-                            last_sum = 0.0
-                            for p in positions:
-                                t = p.get("ticker")
-                                if not t or t in {"RUB","RUB000UTSTOM"}:
-                                    continue
-                                fg = p.get("figi")
-                                qty = float(p.get("quantity") or 0)
-                                if not fg or qty <= 0:
-                                    continue
-                                try:
-                                    async with s_port.post(f"{CHART_URL}/chart_stats", json={"token": user_token, "ident": fg, "tf": "D1"}) as rs:
-                                        if rs.status == 200:
-                                            st = await rs.json()
-                                            last = st.get("last")
-                                            prev = st.get("prev_close")
-                                            if last is not None:
-                                                last_sum += float(last) * qty
-                                            if prev is not None:
-                                                prev_sum += float(prev) * qty
-                                except Exception:
-                                    continue
-                        if last_sum > 0 and prev_sum > 0:
-                            daily_abs = round(last_sum - prev_sum, 2)
-                            daily_pct = round((daily_abs / prev_sum) * 100.0, 2)
-                            current_value = last_sum
-                        elif last_sum > 0:
-                            current_value = last_sum
-                    all_time_abs = round(total_all_time_abs, 2) if total_all_time_abs_any else None
-                    all_time_pct = None
-                    if all_time_abs is not None and current_value and (current_value - all_time_abs) > 0:
-                        all_time_pct = round((all_time_abs / (current_value - all_time_abs)) * 100.0, 2)
-                    if lines:
-                        header = "Портфель:"
-                        change_lines = ""
-                        if daily_abs is not None:
-                            change_lines += f"\n• Суточное изм.: {tg_code(daily_abs)}" + (f" ({tg_code(daily_pct)}%)" if daily_pct is not None else "")
-                        if all_time_abs is not None:
-                            change_lines += f"\n• Изм. за всё время: {tg_code(all_time_abs)}" + (f" ({tg_code(all_time_pct)}%)" if all_time_pct is not None else "")
-                        kb = InlineKeyboardMarkup().add(InlineKeyboardButton(text="✖ Закрыть", callback_data="delete_msg"))
-                        await call.message.answer(f"{header}{change_lines}\n\n" + "\n\n".join(lines), reply_markup=kb, parse_mode="HTML")
+                try:
+                    await asyncio.wait_for(pending_portfolio_updates.get(corr_id), timeout=15.0)
+                except Exception:
+                    pass
+                await render_and_send_portfolio(call.message.chat.id, user_id)
             except Exception:
                 pass
-    await call.answer()
+            await call.answer()
+
+
+def render_and_send_portfolio(chat_id: int, user_id: int):
+    async def render_and_send():
+        try:
+            async with aiohttp.ClientSession() as session:
+                positions: list = []
+                # подождем до ~10 секунд, пока storage_service применит обновление
+                for _ in range(20):
+                    async with session.get(f"{STORAGE_URL}/users/{user_id}/portfolio") as resp_pf:
+                        data_pf = await resp_pf.json()
+                    positions = data_pf.get("positions", [])
+                    if positions:
+                        break
+                    await asyncio.sleep(0.5)
+            if positions:
+                # Сформируем агрегированное сообщение (как в обработчике кнопки портфеля)
+                total_all_time_abs = 0.0
+                total_all_time_abs_any = False
+                sec_positions = []
+                rub_lines = []
+                for p in positions:
+                    t = p.get("ticker") or "?"
+                    fg = p.get("figi") or ""
+                    qty = p.get("quantity") or 0
+                    ey = p.get("expected_yield")
+                    if t in {"RUB","RUB000UTSTOM"}:
+                        rub_lines.append((t, fg, qty))
+                        continue
+                    try:
+                        if ey is not None:
+                            total_all_time_abs += float(ey)
+                            total_all_time_abs_any = True
+                    except Exception:
+                        pass
+                    sec_positions.append((t, fg, qty))
+                # Получим текущие цены по D1 для секций
+                last_by_figi: dict[str, float] = {}
+                if user_token and sec_positions:
+                    async with aiohttp.ClientSession() as s_last:
+                        for t, fg, qty in sec_positions:
+                            if not fg:
+                                continue
+                            try:
+                                async with s_last.post(f"{CHART_URL}/chart_stats", json={"token": user_token, "ident": fg, "tf": "D1"}) as rs2:
+                                    if rs2.status == 200:
+                                        st2 = await rs2.json()
+                                        lv = st2.get("last")
+                                        if lv is not None:
+                                            last_by_figi[fg] = float(lv)
+                            except Exception:
+                                continue
+                lines = []
+                for t, fg, qty in sec_positions:
+                    price_txt = tg_code(last_by_figi.get(fg)) if fg in last_by_figi else "н/д"
+                    lines.append(f"📁 {tg_bold(t)}\n• Количество: {tg_code(qty)}\n• Цена: {price_txt}")
+                for t, fg, qty in rub_lines:
+                    lines.append(f"💰 {tg_bold('Рубли (RUB)')}\n• Остаток: {tg_code(qty)}")
+                # Посчитаем суточную динамику
+                daily_abs = None
+                daily_pct = None
+                current_value = None
+                if user_token:
+                    async with aiohttp.ClientSession() as s_port:
+                        prev_sum = 0.0
+                        last_sum = 0.0
+                        for p in positions:
+                            t = p.get("ticker")
+                            if not t or t in {"RUB","RUB000UTSTOM"}:
+                                continue
+                            fg = p.get("figi")
+                            qty = float(p.get("quantity") or 0)
+                            if not fg or qty <= 0:
+                                continue
+                            try:
+                                async with s_port.post(f"{CHART_URL}/chart_stats", json={"token": user_token, "ident": fg, "tf": "D1"}) as rs:
+                                    if rs.status == 200:
+                                        st = await rs.json()
+                                        last = st.get("last")
+                                        prev = st.get("prev_close")
+                                        if last is not None:
+                                            last_sum += float(last) * qty
+                                        if prev is not None:
+                                            prev_sum += float(prev) * qty
+                            except Exception:
+                                continue
+                    if last_sum > 0 and prev_sum > 0:
+                        daily_abs = round(last_sum - prev_sum, 2)
+                        daily_pct = round((daily_abs / prev_sum) * 100.0, 2)
+                        current_value = last_sum
+                    elif last_sum > 0:
+                        current_value = last_sum
+                all_time_abs = round(total_all_time_abs, 2) if total_all_time_abs_any else None
+                all_time_pct = None
+                if all_time_abs is not None and current_value and (current_value - all_time_abs) > 0:
+                    all_time_pct = round((all_time_abs / (current_value - all_time_abs)) * 100.0, 2)
+                if lines:
+                    header = "Портфель:"
+                    change_lines = ""
+                    if daily_abs is not None:
+                        change_lines += f"\n• Суточное изм.: {tg_code(daily_abs)}" + (f" ({tg_code(daily_pct)}%)" if daily_pct is not None else "")
+                    if all_time_abs is not None:
+                        change_lines += f"\n• Изм. за всё время: {tg_code(all_time_abs)}" + (f" ({tg_code(all_time_pct)}%)" if all_time_pct is not None else "")
+                    kb = InlineKeyboardMarkup().add(InlineKeyboardButton(text="✖ Закрыть", callback_data="delete_msg"))
+                    await bot.send_message(chat_id, f"{header}{change_lines}\n\n" + "\n\n".join(lines), reply_markup=kb, parse_mode="HTML")
+        except Exception:
+            pass
+    asyncio.get_event_loop().create_task(render_and_send())
 
 
 @dp.message_handler(lambda m: m.text == "📁 Портфель")
@@ -676,6 +694,24 @@ async def quotes_consumer():
         await cons.stop()
 
 
+async def portfolio_updated_consumer():
+    cons = await create_consumer(PORTFOLIO_UPDATED, group_id="bot-gateway")
+    try:
+        async for msg in cons:
+            data = msg.value or {}
+            corr_id = data.get("correlation_id")
+            if not corr_id:
+                continue
+            fut = pending_portfolio_updates.pop(corr_id, None)
+            if fut and not fut.done():
+                try:
+                    fut.set_result(True)
+                except Exception:
+                    pass
+    finally:
+        await cons.stop()
+
+
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith("chart:"))
 async def chart_handler(call: types.CallbackQuery):
     try:
@@ -766,6 +802,7 @@ def main():
         loop = asyncio.get_event_loop()
         loop.create_task(notifications_consumer())
         loop.create_task(quotes_consumer())
+        loop.create_task(portfolio_updated_consumer())
 
     executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
 
