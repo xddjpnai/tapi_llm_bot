@@ -278,242 +278,132 @@ async def accounts_done(call: types.CallbackQuery):
             await call.answer()
 
 
-def render_and_send_portfolio(chat_id: int, user_id: int):
-    async def render_and_send():
-        try:
-            async with aiohttp.ClientSession() as session:
-                positions: list = []
-                # подождем до ~10 секунд, пока storage_service применит обновление
-                for _ in range(20):
-                    async with session.get(f"{STORAGE_URL}/users/{user_id}/portfolio") as resp_pf:
-                        data_pf = await resp_pf.json()
-                    positions = data_pf.get("positions", [])
-                    if positions:
-                        break
-                    await asyncio.sleep(0.5)
-            if positions:
-                # Сформируем агрегированное сообщение (как в обработчике кнопки портфеля)
-                total_all_time_abs = 0.0
-                total_all_time_abs_any = False
-                sec_positions = []
-                rub_lines = []
-                for p in positions:
-                    t = p.get("ticker") or "?"
-                    fg = p.get("figi") or ""
-                    qty = p.get("quantity") or 0
-                    ey = p.get("expected_yield")
-                    if t in {"RUB","RUB000UTSTOM"}:
-                        rub_lines.append((t, fg, qty))
-                        continue
-                    try:
-                        if ey is not None:
-                            total_all_time_abs += float(ey)
-                            total_all_time_abs_any = True
-                    except Exception:
-                        pass
-                    sec_positions.append((t, fg, qty))
-                # Получим текущие цены по D1 для секций
-                last_by_figi: dict[str, float] = {}
-                if user_token and sec_positions:
-                    async with aiohttp.ClientSession() as s_last:
-                        for t, fg, qty in sec_positions:
-                            if not fg:
-                                continue
-                            try:
-                                async with s_last.post(f"{CHART_URL}/chart_stats", json={"token": user_token, "ident": fg, "tf": "D1"}) as rs2:
-                                    if rs2.status == 200:
-                                        st2 = await rs2.json()
-                                        lv = st2.get("last")
-                                        if lv is not None:
-                                            last_by_figi[fg] = float(lv)
-                            except Exception:
-                                continue
-                lines = []
-                for t, fg, qty in sec_positions:
-                    price_txt = tg_code(last_by_figi.get(fg)) if fg in last_by_figi else "н/д"
-                    lines.append(f"📁 {tg_bold(t)}\n• Количество: {tg_code(qty)}\n• Цена: {price_txt}")
-                for t, fg, qty in rub_lines:
-                    lines.append(f"💰 {tg_bold('Рубли (RUB)')}\n• Остаток: {tg_code(qty)}")
-                # Посчитаем суточную динамику
-                daily_abs = None
-                daily_pct = None
-                current_value = None
-                if user_token:
-                    async with aiohttp.ClientSession() as s_port:
-                        prev_sum = 0.0
-                        last_sum = 0.0
-                        for p in positions:
-                            t = p.get("ticker")
-                            if not t or t in {"RUB","RUB000UTSTOM"}:
-                                continue
-                            fg = p.get("figi")
-                            qty = float(p.get("quantity") or 0)
-                            if not fg or qty <= 0:
-                                continue
-                            try:
-                                async with s_port.post(f"{CHART_URL}/chart_stats", json={"token": user_token, "ident": fg, "tf": "D1"}) as rs:
-                                    if rs.status == 200:
-                                        st = await rs.json()
-                                        last = st.get("last")
-                                        prev = st.get("prev_close")
-                                        if last is not None:
-                                            last_sum += float(last) * qty
-                                        if prev is not None:
-                                            prev_sum += float(prev) * qty
-                            except Exception:
-                                continue
-                    if last_sum > 0 and prev_sum > 0:
-                        daily_abs = round(last_sum - prev_sum, 2)
-                        daily_pct = round((daily_abs / prev_sum) * 100.0, 2)
-                        current_value = last_sum
-                    elif last_sum > 0:
-                        current_value = last_sum
-                all_time_abs = round(total_all_time_abs, 2) if total_all_time_abs_any else None
-                all_time_pct = None
-                if all_time_abs is not None and current_value and (current_value - all_time_abs) > 0:
-                    all_time_pct = round((all_time_abs / (current_value - all_time_abs)) * 100.0, 2)
-                if lines:
-                    header = "Портфель:"
-                    change_lines = ""
-                    if daily_abs is not None:
-                        change_lines += f"\n• Суточное изм.: {tg_code(daily_abs)}" + (f" ({tg_code(daily_pct)}%)" if daily_pct is not None else "")
-                    if all_time_abs is not None:
-                        change_lines += f"\n• Изм. за всё время: {tg_code(all_time_abs)}" + (f" ({tg_code(all_time_pct)}%)" if all_time_pct is not None else "")
-                    kb = InlineKeyboardMarkup().add(InlineKeyboardButton(text="✖ Закрыть", callback_data="delete_msg"))
-                    await bot.send_message(chat_id, f"{header}{change_lines}\n\n" + "\n\n".join(lines), reply_markup=kb, parse_mode="HTML")
-        except Exception:
-            pass
-    asyncio.get_event_loop().create_task(render_and_send())
-
-
-@dp.message_handler(lambda m: m.text == "📁 Портфель")
-async def show_portfolio(message: types.Message):
-    user_id = message.from_user.id
-    async with aiohttp.ClientSession() as session:
-        async with session.get(f"{STORAGE_URL}/users/{user_id}/portfolio") as resp:
-            data = await resp.json()
-    positions = data.get("positions", [])
-    if not positions:
-        await message.answer("Портфель пуст. Обновляю…")
-        # триггерим обновление через Kafka
+async def render_and_send_portfolio(chat_id: int, user_id: int):
+    try:
+        # Получим свежий портфель (после PORTFOLIO_UPDATED он уже записан в storage)
         async with aiohttp.ClientSession() as session:
-            async with session.get(f"{STORAGE_URL}/users/{user_id}/selected_accounts") as resp:
-                sel = await resp.json()
-            async with session.get(f"{STORAGE_URL}/users/{user_id}/token") as resp2:
-                tok_json = await resp2.json()
-        accounts = sel.get("accounts", [])
-        user_token = (tok_json or {}).get("token")
-        if accounts and user_token:
-            prod = await create_producer()
+            async with session.get(f"{STORAGE_URL}/users/{user_id}/portfolio") as resp_pf:
+                data_pf = await resp_pf.json()
+        positions: list = data_pf.get("positions", [])
+
+        # Подготовим агрегаты
+        total_all_time_abs = 0.0
+        total_all_time_abs_any = False
+        sec_positions = []
+        rub_lines = []
+        for p in positions:
+            t = p.get("ticker") or "?"
+            fg = p.get("figi") or ""
+            qty = p.get("quantity") or 0
+            ey = p.get("expected_yield")
+            if t in {"RUB","RUB000UTSTOM"}:
+                rub_lines.append((t, fg, qty))
+                continue
             try:
-                corr_id = str(uuid.uuid4())
-                await prod.send_and_wait(PORTFOLIO_REQUEST, {"user_id": user_id, "accounts": accounts, "correlation_id": corr_id, "token": user_token}, key=str(user_id).encode())
-            finally:
-                await prod.stop()
-            # подождем до 6 сек обновления и покажем портфель
-            async with aiohttp.ClientSession() as session:
-                fresh = []
-                for _ in range(12):
-                    async with session.get(f"{STORAGE_URL}/users/{user_id}/portfolio") as resp3:
-                        data2 = await resp3.json()
-                    fresh = data2.get("positions", [])
-                    if fresh:
-                        break
-                    await asyncio.sleep(0.5)
-            positions = fresh
-            if not positions:
-                return
-        elif accounts and not user_token:
-            await message.answer("Для обновления портфеля сохраните токен: нажмите ‘🔑 Токен’.")
-            return
-    # Собираем весь портфель в один текст + считаем суммарные изменения
-    total_all_time_abs = 0.0
-    total_all_time_abs_any = False
-    sec_positions = []
-    rub_lines = []
-    for p in positions:
-        t = p.get("ticker") or "?"
-        fg = p.get("figi") or ""
-        qty = p.get("quantity") or 0
-        ey = p.get("expected_yield")
-        if t in {"RUB","RUB000UTSTOM"}:
-            rub_lines.append((t, fg, qty))
-            continue
-        # агрегируем изменения за всё время (абсолютное)
-        try:
-            if ey is not None:
-                total_all_time_abs += float(ey)
-                total_all_time_abs_any = True
-        except Exception:
-            pass
-        sec_positions.append((t, fg, qty))
-    # Рассчитаем суточное изменение по D1 через chart_stats и возьмем текущие цены для показа в списке
-    daily_abs = None
-    daily_pct = None
-    current_value = None
-    last_by_figi: dict[str, float] = {}
-    # Получим токен для запросов в chart_service
-    user_id = message.from_user.id
-    user_token: str | None = None
-    async with aiohttp.ClientSession() as s_port:
-        async with s_port.get(f"{STORAGE_URL}/users/{user_id}/token") as rtk:
-            if rtk.status < 300:
-                tok_json = await rtk.json()
-                user_token = (tok_json or {}).get("token")
-        if user_token:
+                if ey is not None:
+                    total_all_time_abs += float(ey)
+                    total_all_time_abs_any = True
+            except Exception:
+                pass
+            sec_positions.append((t, fg, qty))
+
+        # Получим токен и рассчитаем цены и дневную динамику
+        last_by_figi: dict[str, float] = {}
+        daily_abs = None
+        daily_pct = None
+        current_value = None
+        user_token: str | None = None
+        async with aiohttp.ClientSession() as s_tok:
+            async with s_tok.get(f"{STORAGE_URL}/users/{user_id}/token") as rtk:
+                if rtk.status < 300:
+                    tok_json = await rtk.json()
+                    user_token = (tok_json or {}).get("token")
+        if user_token and sec_positions:
             prev_sum = 0.0
             last_sum = 0.0
-            for p in positions:
-                t = p.get("ticker")
-                if not t or t in {"RUB","RUB000UTSTOM"}:
-                    continue
-                fg = p.get("figi")
-                qty = float(p.get("quantity") or 0)
-                if not fg or qty <= 0:
-                    continue
-                try:
-                    async with s_port.post(f"{CHART_URL}/chart_stats", json={"token": user_token, "ident": fg, "tf": "D1"}) as rs:
-                        if rs.status == 200:
-                            st = await rs.json()
-                            last = st.get("last")
-                            prev = st.get("prev_close")
-                            if last is not None:
-                                last_by_figi[fg] = float(last)
-                            if last is not None:
-                                last_sum += float(last) * qty
-                            if prev is not None:
-                                prev_sum += float(prev) * qty
-                except Exception:
-                    continue
+            async with aiohttp.ClientSession() as s_stats:
+                for t, fg, qty in sec_positions:
+                    if not fg:
+                        continue
+                    try:
+                        async with s_stats.post(f"{CHART_URL}/chart_stats", json={"token": user_token, "ident": fg, "tf": "D1"}) as rs2:
+                            if rs2.status == 200:
+                                st2 = await rs2.json()
+                                lv = st2.get("last")
+                                pv = st2.get("prev_close")
+                                if lv is not None:
+                                    last_by_figi[fg] = float(lv)
+                                    last_sum += float(lv) * float(qty)
+                                if pv is not None:
+                                    prev_sum += float(pv) * float(qty)
+                    except Exception:
+                        continue
             if last_sum > 0 and prev_sum > 0:
                 daily_abs = round(last_sum - prev_sum, 2)
                 daily_pct = round((daily_abs / prev_sum) * 100.0, 2)
                 current_value = last_sum
             elif last_sum > 0:
                 current_value = last_sum
-    # За всё время: используем суммарную ожидаемую доходность и оцениваем процент относительно текущей стоимости
-    all_time_abs = round(total_all_time_abs, 2) if total_all_time_abs_any else None
-    all_time_pct = None
-    if all_time_abs is not None and current_value and (current_value - all_time_abs) > 0:
-        all_time_pct = round((all_time_abs / (current_value - all_time_abs)) * 100.0, 2)
 
-    # Сборка строк: ценные бумаги, затем рубль
-    lines = []
-    for t, fg, qty in sec_positions:
-        price_txt = tg_code(last_by_figi.get(fg)) if fg in last_by_figi else "н/д"
-        lines.append(f"📁 {tg_bold(t)}\n• Количество: {tg_code(qty)}\n• Цена: {price_txt}")
-    for t, fg, qty in rub_lines:
-        lines.append(f"💰 {tg_bold('Рубли (RUB)')}\n• Остаток: {tg_code(qty)}")
+        # Итоги и отправка
+        all_time_abs = round(total_all_time_abs, 2) if total_all_time_abs_any else None
+        all_time_pct = None
+        if all_time_abs is not None and current_value and (current_value - all_time_abs) > 0:
+            all_time_pct = round((all_time_abs / (current_value - all_time_abs)) * 100.0, 2)
+        lines = []
+        for t, fg, qty in sec_positions:
+            price_txt = tg_code(last_by_figi.get(fg)) if fg in last_by_figi else "н/д"
+            lines.append(f"📁 {tg_bold(t)}\n• Количество: {tg_code(qty)}\n• Цена: {price_txt}")
+        for t, fg, qty in rub_lines:
+            lines.append(f"💰 {tg_bold('Рубли (RUB)')}\n• Остаток: {tg_code(qty)}")
+        if lines:
+            header = "Портфель:"
+            change_lines = ""
+            if daily_abs is not None:
+                change_lines += f"\n• Суточное изм.: {tg_code(daily_abs)}" + (f" ({tg_code(daily_pct)}%)" if daily_pct is not None else "")
+            if all_time_abs is not None:
+                change_lines += f"\n• Изм. за всё время: {tg_code(all_time_abs)}" + (f" ({tg_code(all_time_pct)}%)" if all_time_pct is not None else "")
+            kb = InlineKeyboardMarkup().add(InlineKeyboardButton(text="✖ Закрыть", callback_data="delete_msg"))
+            await bot.send_message(chat_id, f"{header}{change_lines}\n\n" + "\n\n".join(lines), reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        pass
 
-    if lines:
-        header = "Портфель:"
-        change_lines = ""
-        if daily_abs is not None:
-            change_lines += f"\n• Суточное изм.: {tg_code(daily_abs)}" + (f" ({tg_code(daily_pct)}%)" if daily_pct is not None else "")
-        if all_time_abs is not None:
-            change_lines += f"\n• Изм. за всё время: {tg_code(all_time_abs)}" + (f" ({tg_code(all_time_pct)}%)" if all_time_pct is not None else "")
-        kb = InlineKeyboardMarkup().add(InlineKeyboardButton(text="✖ Закрыть", callback_data="delete_msg"))
-        await message.answer(f"{header}{change_lines}\n\n" + "\n\n".join(lines), reply_markup=kb, parse_mode="HTML")
+
+@dp.message_handler(lambda m: m.text == "📁 Портфель")
+async def show_portfolio(message: types.Message):
+    user_id = message.from_user.id
+    try:
+        # Всегда пытаемся обновить портфель перед выводом
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{STORAGE_URL}/users/{user_id}/selected_accounts") as resp_sel:
+                sel = await resp_sel.json()
+            async with session.get(f"{STORAGE_URL}/users/{user_id}/token") as resp_tok:
+                tok_json = await resp_tok.json()
+        accounts = (sel or {}).get("accounts", [])
+        user_token = (tok_json or {}).get("token")
+        if accounts and user_token:
+            prod = await create_producer()
+            corr_id = str(uuid.uuid4())
+            try:
+                fut = asyncio.get_event_loop().create_future()
+                pending_portfolio_updates[corr_id] = fut
+                await prod.send_and_wait(PORTFOLIO_REQUEST, {"user_id": user_id, "accounts": accounts, "correlation_id": corr_id, "token": user_token}, key=str(user_id).encode())
+            finally:
+                await prod.stop()
+            await message.answer("Обновляю портфель…")
+            try:
+                try:
+                    await asyncio.wait_for(pending_portfolio_updates.get(corr_id), timeout=15.0)
+                except Exception:
+                    pass
+                await render_and_send_portfolio(message.chat.id, user_id)
+                return
+            except Exception:
+                pass
+        # Fallback: если нет токена/счетов — просто покажем текущее состояние
+        await render_and_send_portfolio(message.chat.id, user_id)
+    except Exception:
+        await render_and_send_portfolio(message.chat.id, user_id)
 
 
 def build_settings_kb(s: dict) -> InlineKeyboardMarkup:
