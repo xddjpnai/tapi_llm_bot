@@ -87,9 +87,21 @@ $SUDO $COMPOSE_CMD up -d --build
 
 echo "==> Validating connectivity to Telegram..."
 set +e
+TG_RC=0
 if command_exists curl; then
-  curl -m 5 -sS https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe >/dev/null
-  TG_RC=$?
+  TG_TOKEN_VALUE=""
+  if grep -Eq '^TELEGRAM_BOT_TOKEN=[^#\n]+' .env; then
+    TG_TOKEN_VALUE="$(grep -E '^TELEGRAM_BOT_TOKEN=' .env | head -n1 | cut -d'=' -f2-)"
+    # strip optional quotes
+    TG_TOKEN_VALUE="${TG_TOKEN_VALUE%\"}"; TG_TOKEN_VALUE="${TG_TOKEN_VALUE#\"}"
+    TG_TOKEN_VALUE="${TG_TOKEN_VALUE%\'}"; TG_TOKEN_VALUE="${TG_TOKEN_VALUE#\'}"
+  fi
+  if [ -n "$TG_TOKEN_VALUE" ]; then
+    curl -m 5 -sS "https://api.telegram.org/bot${TG_TOKEN_VALUE}/getMe" >/dev/null
+    TG_RC=$?
+  else
+    TG_RC=1
+  fi
 else
   TG_RC=0
 fi
