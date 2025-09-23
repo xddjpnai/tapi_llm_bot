@@ -93,7 +93,10 @@ async def show_news(message: types.Message):
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(f"{STORAGE_URL}/users/{user_id}/portfolio") as resp:
-                data = await resp.json()
+                if resp.status >= 300:
+                    data = {"positions": []}
+                else:
+                    data = await resp.json()
         except Exception:
             data = {"positions": []}
     tickers = [p.get("ticker") for p in data.get("positions", []) if p.get("ticker") and p.get("ticker") not in {"RUB","RUB000UTSTOM"}]
@@ -262,8 +265,8 @@ async def accounts_done(call: types.CallbackQuery):
             try:
                 async with aiohttp.ClientSession() as session:
                     positions: list = []
-                    # подождем до ~6 секунд, пока storage_service применит обновление
-                    for _ in range(12):
+                    # подождем до ~10 секунд, пока storage_service применит обновление
+                    for _ in range(20):
                         async with session.get(f"{STORAGE_URL}/users/{user_id}/portfolio") as resp_pf:
                             data_pf = await resp_pf.json()
                         positions = data_pf.get("positions", [])
@@ -514,11 +517,18 @@ def build_settings_kb(s: dict) -> InlineKeyboardMarkup:
 @dp.message_handler(lambda m: m.text == "🛠 Настройки")
 async def settings_menu(message: types.Message):
     user_id = message.from_user.id
-    async with aiohttp.ClientSession() as session:
-        async with session.get(f"{STORAGE_URL}/users/{user_id}/settings") as resp:
-            s = await resp.json()
-    kb = build_settings_kb(s)
-    await message.answer("Настройки ежедневной сводки и уведомлений:", reply_markup=kb)
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{STORAGE_URL}/users/{user_id}/settings") as resp:
+                if resp.status >= 300:
+                    txt = await resp.text()
+                    await message.answer(f"Ошибка получения настроек: {txt}")
+                    return
+                s = await resp.json()
+        kb = build_settings_kb(s)
+        await message.answer("Настройки ежедневной сводки и уведомлений:", reply_markup=kb)
+    except Exception:
+        await message.answer("Не удалось получить настройки. Попробуйте позже.")
 
 
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith("settings_toggle:"))
@@ -750,11 +760,14 @@ async def delete_message(call: types.CallbackQuery):
 
 
 def main():
-    loop = asyncio.get_event_loop()
-    loop.create_task(notifications_consumer())
-    loop.create_task(quotes_consumer())
     from aiogram import executor
-    executor.start_polling(dp, skip_updates=True)
+
+    async def on_startup(_dp):
+        loop = asyncio.get_event_loop()
+        loop.create_task(notifications_consumer())
+        loop.create_task(quotes_consumer())
+
+    executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
 
 
 if __name__ == "__main__":
