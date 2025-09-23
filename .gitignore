@@ -17,3 +17,36 @@ venv/
 
 # Local artifacts
 notebooks/
+
+# Secrets and keys
+keys/
+**/keys/**
+.ssh/
+**/.ssh/**
+*.pem
+*.key
+*.crt
+*.cer
+*.p12
+*.pfx
+*.der
+*.asc
+*.gpg
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+*credentials*.json
+*service_account*.json
+secrets.*
+*.secret
+*.secrets
+
+# Env files
+.env.*
+.env*
+.envrc
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
