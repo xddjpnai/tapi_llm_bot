@@ -297,15 +297,15 @@ async def consume_portfolio_updates():
                             if eyp is not None:
                                 agg[t]["expected_yield_percent"] = float(eyp)
                         else:
-                        agg[t] = {
-                            "quantity": qty,
-                            "figi": fg,
-                            "expected_yield": float(ey) if ey is not None else None,
-                            "expected_yield_percent": float(eyp) if eyp is not None else None,
-                            "market": p.get("market"),
-                            "currency": p.get("currency"),
-                            "name": p.get("name"),
-                        }
+                            agg[t] = {
+                                "quantity": qty,
+                                "figi": fg,
+                                "expected_yield": float(ey) if ey is not None else None,
+                                "expected_yield_percent": float(eyp) if eyp is not None else None,
+                                "market": p.get("market"),
+                                "currency": p.get("currency"),
+                                "name": p.get("name"),
+                            }
                     rows_local = [
                         {
                             "user_id": user_id,
