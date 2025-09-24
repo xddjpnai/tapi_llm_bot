@@ -53,6 +53,9 @@ portfolio = Table(
     Column("quantity", Float),
     Column("expected_yield", Float, nullable=True),
     Column("expected_yield_percent", Float, nullable=True),
+    Column("market", String, nullable=True),
+    Column("currency", String, nullable=True),
+    Column("name", String, nullable=True),
     PrimaryKeyConstraint("user_id", "ticker"),
 )
 
@@ -82,6 +85,9 @@ def _safe_migrate_add_portfolio_columns():
             if engine.dialect.name == "postgresql":
                 conn.execute("ALTER TABLE portfolio ADD COLUMN IF NOT EXISTS expected_yield double precision")
                 conn.execute("ALTER TABLE portfolio ADD COLUMN IF NOT EXISTS expected_yield_percent double precision")
+                conn.execute("ALTER TABLE portfolio ADD COLUMN IF NOT EXISTS market varchar")
+                conn.execute("ALTER TABLE portfolio ADD COLUMN IF NOT EXISTS currency varchar")
+                conn.execute("ALTER TABLE portfolio ADD COLUMN IF NOT EXISTS name varchar")
             elif engine.dialect.name == "sqlite":
                 # SQLite doesn't support IF NOT EXISTS for ADD COLUMN in older versions; try and ignore errors
                 try:
@@ -92,6 +98,11 @@ def _safe_migrate_add_portfolio_columns():
                     conn.execute("ALTER TABLE portfolio ADD COLUMN expected_yield_percent REAL")
                 except Exception:
                     pass
+                for column in ("market", "currency", "name"):
+                    try:
+                        conn.execute(f"ALTER TABLE portfolio ADD COLUMN {column} TEXT")
+                    except Exception:
+                        pass
     except Exception:
         # Best-effort migration; if it fails, subsequent queries may still work if columns exist
         pass
@@ -153,6 +164,9 @@ def get_portfolio(user_id: int):
         "quantity": r.quantity,
         "expected_yield": getattr(r, "expected_yield", None),
         "expected_yield_percent": getattr(r, "expected_yield_percent", None),
+        "market": getattr(r, "market", None),
+        "currency": getattr(r, "currency", None),
+        "name": getattr(r, "name", None),
     } for r in rows]}
 
 
@@ -283,9 +297,27 @@ async def consume_portfolio_updates():
                             if eyp is not None:
                                 agg[t]["expected_yield_percent"] = float(eyp)
                         else:
-                            agg[t] = {"quantity": qty, "figi": fg, "expected_yield": float(ey) if ey is not None else None, "expected_yield_percent": float(eyp) if eyp is not None else None}
+                    agg[t] = {
+                        "quantity": qty,
+                        "figi": fg,
+                        "expected_yield": float(ey) if ey is not None else None,
+                        "expected_yield_percent": float(eyp) if eyp is not None else None,
+                        "market": p.get("market"),
+                        "currency": p.get("currency"),
+                        "name": p.get("name"),
+                    }
                     rows_local = [
-                        {"user_id": user_id, "ticker": t, "figi": v.get("figi"), "quantity": v.get("quantity"), "expected_yield": v.get("expected_yield"), "expected_yield_percent": v.get("expected_yield_percent")}
+                        {
+                            "user_id": user_id,
+                            "ticker": t,
+                            "figi": v.get("figi"),
+                            "quantity": v.get("quantity"),
+                            "expected_yield": v.get("expected_yield"),
+                            "expected_yield_percent": v.get("expected_yield_percent"),
+                            "market": v.get("market"),
+                            "currency": v.get("currency"),
+                            "name": v.get("name"),
+                        }
                         for t, v in agg.items()
                     ]
                     if rows_local:

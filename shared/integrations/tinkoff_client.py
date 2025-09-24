@@ -1,10 +1,7 @@
-from datetime import timedelta
-from typing import Dict, List
 import logging
+from typing import Dict
 
-from tinkoff.invest import AsyncClient, CandleInterval
-from tinkoff.invest.schemas import CandleSource
-from tinkoff.invest.utils import now
+from tinkoff.invest import AsyncClient
 
 
 logging.basicConfig(level=logging.INFO)
@@ -16,6 +13,7 @@ class TinkoffClient:
         if not token:
             raise ValueError("Tinkoff token is required")
         self.token = token
+        self._instrument_cache: Dict[str, Dict[str, str]] = {}
 
     @staticmethod
     def _to_float(value) -> float | None:
@@ -32,6 +30,51 @@ class TinkoffClient:
             return float(value)
         except Exception:
             return None
+
+    @staticmethod
+    def _extract_currency(position) -> str | None:
+        price = getattr(position, "current_price", None)
+        currency = getattr(price, "currency", None) if price else None
+        if currency:
+            return currency
+        return getattr(position, "instrument_currency", None) or getattr(position, "currency", None)
+
+    @staticmethod
+    def _normalize_market(meta: Dict[str, str]) -> str | None:
+        exchange = (meta.get("exchange") or "").upper()
+        country = (meta.get("country_of_risk") or meta.get("country_of_risk_name") or "").upper()
+        if "MOEX" in exchange or country == "RU":
+            return "RU"
+        if "SPB" in exchange:
+            return "RU_SPB"
+        if exchange:
+            return exchange
+        if country:
+            return country
+        return None
+
+    async def _get_instrument_meta(self, client: AsyncClient, figi: str | None) -> Dict[str, str]:
+        if not figi:
+            return {}
+        if figi in self._instrument_cache:
+            return self._instrument_cache[figi]
+        meta: Dict[str, str] = {}
+        try:
+            response = await client.instruments.get_instrument_by_figi(figi=figi)
+            instrument = getattr(response, "instrument", None) or response
+            if instrument:
+                meta = {
+                    "exchange": getattr(instrument, "exchange", None),
+                    "currency": getattr(instrument, "currency", None),
+                    "country_of_risk": getattr(instrument, "country_of_risk", None),
+                    "country_of_risk_name": getattr(instrument, "country_of_risk_name", None),
+                    "name": getattr(instrument, "name", None),
+                    "instrument_type": getattr(instrument, "instrument_type", None),
+                }
+        except Exception as e:
+            logger.debug("Не удалось получить данные инструмента по FIGI %s: %s", figi, e)
+        self._instrument_cache[figi] = meta
+        return meta
 
     async def get_accounts(self):
         async with AsyncClient(self.token) as client:
@@ -89,17 +132,23 @@ class TinkoffClient:
                         ticker_like = getattr(p, "ticker", None) or getattr(p, "instrument", None)
                         figi = getattr(p, "figi", None)
                         ticker_value = ticker_like or figi or "UNKNOWN"
-                        # expected yield (absolute and percent) if available
                         exp_y = getattr(p, "expected_yield", None)
                         exp_y_val = self._to_float(exp_y)
                         exp_pct = getattr(p, "expected_yield_percent", None)
                         exp_pct_val = self._to_float(exp_pct)
+                        meta = await self._get_instrument_meta(client, figi)
+                        currency = self._extract_currency(p) or meta.get("currency")
+                        market = self._normalize_market(meta)
+                        name = meta.get("name") or getattr(p, "name", None)
                         result.append({
                             "ticker": ticker_value,
                             "quantity": qty,
                             "figi": figi,
                             "expected_yield": exp_y_val,
                             "expected_yield_percent": exp_pct_val,
+                            "market": market,
+                            "currency": currency,
+                            "name": name,
                         })
                 except Exception as e:
                     logger.warning("Не удалось получить портфель для %s: %s", account_id, e)
@@ -112,7 +161,5 @@ class TinkoffClient:
         async with AsyncClient(self.token) as client:
             prices = await client.market_data.get_last_prices(figi=figi_list)
             return {p.figi: float(p.price.units + p.price.nano / 1e9) for p in prices.last_prices}
-
-    # Removed unused helpers: get_instruments_short, resolve_figi_by_tickers, get_candles
 
 
