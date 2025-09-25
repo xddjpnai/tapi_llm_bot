@@ -127,12 +127,6 @@ def build_accounts_kb(all_accounts: list[str], selected: set[str]) -> InlineKeyb
     return kb
 
 
-# Команда /token больше не используется — оставим на случай старых пользователей, покажем подсказку про кнопку
-@dp.message_handler(commands=["token"])
-async def set_token(message: types.Message):
-    await message.reply("Сейчас обновление токена делается через кнопку ‘🔑 Токен’. Нажмите её и пришлите токен ответом.")
-
-
 @dp.message_handler(lambda m: m.text == "🔑 Токен")
 async def update_token_request(message: types.Message):
     from aiogram.types import ForceReply
@@ -474,9 +468,6 @@ async def settings_time(call: types.CallbackQuery):
     except Exception:
         pass
     await call.answer()
-
-
-# Удалены элементы управления порогом изменения; коллбек не используется
 
 
 @dp.message_handler(lambda m: m.text == "💹 Котировки")

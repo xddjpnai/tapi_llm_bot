@@ -1,6 +1,7 @@
 import os
 import asyncio
 import logging
+from datetime import datetime
 from typing import List
 
 from fastapi import FastAPI, HTTPException
@@ -22,6 +23,8 @@ from typing import Optional
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+USER_TIME_OFFSET_HOURS = int(os.getenv("USER_TIME_OFFSET_HOURS", "3"))
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg2://postgres:postgres@postgres:5432/postgres")
 
@@ -77,6 +80,29 @@ tokens = Table(
 )
 
 metadata.create_all(engine)
+
+
+def _shift_time(value: str, hours: int) -> str:
+    if not value:
+        return value
+    try:
+        dt = datetime.strptime(value.strip(), "%H:%M")
+    except Exception:
+        return value
+    total_minutes = (dt.hour * 60 + dt.minute + hours * 60) % (24 * 60)
+    return f"{total_minutes // 60:02d}:{total_minutes % 60:02d}"
+
+
+def _user_time_to_server(value: str) -> str:
+    if USER_TIME_OFFSET_HOURS == 0:
+        return value.strip()
+    return _shift_time(value, -USER_TIME_OFFSET_HOURS)
+
+
+def _server_time_to_user(value: str) -> str:
+    if USER_TIME_OFFSET_HOURS == 0:
+        return value
+    return _shift_time(value, USER_TIME_OFFSET_HOURS)
 
 
 def _safe_migrate_add_portfolio_columns():
@@ -177,7 +203,7 @@ def get_settings(user_id: int):
             row = conn.execute(settings.select().where(settings.c.user_id == user_id)).fetchone()
             if row:
                 return {
-                    "daily_summary_time": row.daily_summary_time,
+                    "daily_summary_time": _server_time_to_user(row.daily_summary_time),
                     "daily_summary_enabled": bool(row.daily_summary_enabled),
                     "alert_threshold_percent": row.alert_threshold_percent,
                     "notify_quotes": bool(row.notify_quotes),
@@ -200,7 +226,7 @@ def get_settings(user_id: int):
 def update_settings(user_id: int, body: SettingsPayload):
     values = {}
     if body.daily_summary_time is not None:
-        values["daily_summary_time"] = body.daily_summary_time
+        values["daily_summary_time"] = _user_time_to_server(body.daily_summary_time)
     if body.daily_summary_enabled is not None:
         values["daily_summary_enabled"] = 1 if body.daily_summary_enabled else 0
     if body.alert_threshold_percent is not None:
